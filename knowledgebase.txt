@@ -1,4 +1,6 @@
-This project is a small FastAPI-based RAG app. It ingests files or URLs, chunks text, embeds chunks with OpenAI, stores them in Qdrant, retrieves relevant chunks for questions, generates an answer with citations, and stores user feedback in SQLite.
+This project is a small FastAPI-based RAG app. It ingests files or URLs, chunks text, embeds chunks with OpenAI, stores them in Qdrant, 
+retrieves relevant chunks for questions, generates an answer with citations, and stores user feedback in SQLite.
+
 Main Request Flow
    1. User calls /ingest or /ingest/upload.
    2. The app extracts text from files or URLs.
@@ -40,6 +42,7 @@ Step by step:
       - x-api-key: <token>
       - Authorization: Bearer <token>
    5. If neither matches, it raises 401 Missing or invalid API key.
+
 apps/api/routes/ingest.py
 This implements document ingestion.
 It exposes:
@@ -70,6 +73,7 @@ Step by step for POST /ingest/upload:
    7. Deletes the temp file.
    8. Chunks, embeds, and stores the content in Qdrant.
    9. Runs the heavy ingestion work in a threadpool so the async endpoint is not blocked.
+
 apps/api/routes/ask.py
 This implements question answering.
 It exposes:
@@ -97,6 +101,7 @@ Step by step:
         "citations": [...],
         "used": 5
       }
+
 apps/api/routes/documents.py
 This manages collections and ingested documents.
 It exposes:
@@ -123,6 +128,7 @@ Step by step:
    4. DELETE /documents/collections/{collection}
       - Deletes the entire Qdrant collection.
    - Returns 404 if the collection does not exist.
+
 apps/api/routes/feedback.py
 This stores thumbs-up / thumbs-down feedback.
 It exposes:
@@ -144,7 +150,9 @@ Step by step:
       - notes
    6. Returns:
       {"ok": true}
+
 Core RAG Files
+
 core/chunking.py
 This splits long text into smaller overlapping pieces.
 Step by step:
@@ -167,6 +175,7 @@ Step by step:
    6. Returns:
       - list of chunk strings
       - list of chunk metadata dictionaries
+
 core/embeddings.py
 This creates vector embeddings using OpenAI.
 Step by step:
@@ -179,6 +188,7 @@ Step by step:
 Used by:
 - ingestion, to embed document chunks
 - asking, to embed the user question
+
 core/retriever.py
 This wraps Qdrant operations.
 Step by step:
@@ -202,7 +212,9 @@ Step by step:
    12. list_documents() scrolls Qdrant records and groups chunks by source.
    13. delete_document() deletes all chunks matching a source.
    14. delete_collection() deletes a full collection.
-One important note: _ensure_collection() uses recreate_collection() when the collection is missing. In newer Qdrant clients, recreate_collection is often deprecated in favor of explicit create/delete behavior.
+One important note: _ensure_collection() uses recreate_collection() when the collection is missing. In newer Qdrant clients, 
+recreate_collection is often deprecated in favor of explicit create/delete behavior.
+
 core/generator.py
 This generates the final answer using OpenAI chat completion.
 Step by step:
@@ -244,6 +256,7 @@ Step by step:
    5. For unknown extensions:
       - tries to read as UTF-8 text
       - returns empty text if that fails
+
 core/crawling/web.py
 This extracts readable text from web pages.
 Step by step:
@@ -265,6 +278,7 @@ Step by step:
    7. Joins their visible text into one large string.
    8. Returns text and title.
    9. If anything fails, returns empty strings.
+
 Test File
 tests/test_chunking.py
 This tests chunking behavior.
@@ -276,6 +290,7 @@ Step by step:
       - overlap=200
    4. Asserts that at least 3 chunks are created.
    5. Asserts that every chunk has matching metadata.
+
 Mental Model
 The core pieces connect like this:
 ingest.py
