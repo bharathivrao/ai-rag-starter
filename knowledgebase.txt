@@ -1,0 +1,296 @@
+This project is a small FastAPI-based RAG app. It ingests files or URLs, chunks text, embeds chunks with OpenAI, stores them in Qdrant, retrieves relevant chunks for questions, generates an answer with citations, and stores user feedback in SQLite.
+Main Request Flow
+1. User calls /ingest or /ingest/upload.
+2. The app extracts text from files or URLs.
+3. Text is split into overlapping chunks.
+4. Each chunk is embedded using OpenAI embeddings.
+5. Chunks plus metadata are stored in Qdrant.
+6. User calls /ask.
+7. The question is embedded.
+8. Qdrant finds similar chunks.
+9. The retrieved chunks are passed to OpenAI chat completion.
+10. The app returns an answer plus citations.
+API Files
+apps/api/main.py
+This is the FastAPI application entrypoint.
+Step by step:
+1. Loads environment variables from .env using load_dotenv().
+2. Creates the FastAPI app with title AI RAG Starter.
+3. Enables permissive CORS so browsers can call the API from any origin.
+4. Imports route modules:
+   - ask
+   - ingest
+   - feedback
+   - documents
+5. Registers each router with the app.
+6. Adds a global exception handler that hides internal errors and returns:
+   {"detail": "Internal server error"}
+7. Defines /, which returns basic app info and endpoint names.
+8. Defines /health, which returns:
+   {"status": "ok"}
+apps/api/auth.py
+This handles optional API-key authentication.
+Step by step:
+1. Reads API_AUTH_TOKEN from the environment.
+2. Defines require_api_key(), used as a FastAPI dependency.
+3. If API_AUTH_TOKEN is not set, authentication is disabled.
+4. If auth is enabled, it accepts either:
+   - x-api-key: <token>
+   - Authorization: Bearer <token>
+5. If neither matches, it raises 401 Missing or invalid API key.
+apps/api/routes/ingest.py
+This implements document ingestion.
+It exposes:
+- POST /ingest
+- POST /ingest/upload
+Step by step for POST /ingest:
+1. Validates the request body with IngestBody.
+2. Each source must be either:
+   - type: "url" with a url
+   - type: "file" with a local path
+3. For URL sources, it calls fetch_url_text().
+4. For file sources, it calls parse_local_file().
+5. Empty extracted content is skipped.
+6. If no usable text remains, it returns 400 No valid content to ingest.
+7. Calls chunk_texts() to split documents into chunks.
+8. Calls embed_texts() to generate OpenAI embeddings.
+9. Creates a QdrantStore.
+10. Stores chunks, vectors, and metadata in Qdrant.
+11. Returns:
+   {"ok": true, "chunks": <number>}
+Step by step for POST /ingest/upload:
+1. Accepts uploaded files through multipart form data.
+2. Rejects empty uploads.
+3. Rejects more than 20 files.
+4. Reads each uploaded file into memory.
+5. Writes each upload temporarily to disk because the parser expects a file path.
+6. Parses the temp file.
+7. Deletes the temp file.
+8. Chunks, embeds, and stores the content in Qdrant.
+9. Runs the heavy ingestion work in a threadpool so the async endpoint is not blocked.
+apps/api/routes/ask.py
+This implements question answering.
+It exposes:
+- POST /ask
+Step by step:
+1. Validates the request body with AskBody.
+2. Requires:
+   - question
+   - optional collection
+   - optional k, defaulting to 5
+3. Rejects blank questions.
+4. Creates a QdrantStore.
+5. Checks whether the requested collection exists.
+6. Embeds the user question using embed_texts().
+7. Searches Qdrant for the top k matching chunks.
+8. Extracts chunk text from each result payload.
+9. Builds a citation list from result metadata.
+10. Calls generate_answer() with:
+   - question
+   - retrieved chunks
+   - citations
+11. Returns:
+   {
+     "answer": "...",
+     "citations": [...],
+     "used": 5
+   }
+apps/api/routes/documents.py
+This manages collections and ingested documents.
+It exposes:
+- GET /documents/collections
+- GET /documents
+- DELETE /documents
+- DELETE /documents/collections/{collection}
+Step by step:
+1. GET /documents/collections
+   - Creates a QdrantStore.
+   - Lists all Qdrant collections.
+   - Returns them as {"collections": [...]}.
+2. GET /documents
+   - Takes a collection name and limit.
+   - Checks that the collection exists.
+   - Scrolls through Qdrant points.
+   - Groups chunks by source.
+   - Returns one entry per original document with chunk counts.
+3. DELETE /documents
+   - Takes a source query parameter.
+   - Deletes all chunks in the collection whose payload source matches.
+   - Returns how many chunks were deleted.
+   - If nothing matched, returns 404.
+4. DELETE /documents/collections/{collection}
+   - Deletes the entire Qdrant collection.
+   - Returns 404 if the collection does not exist.
+apps/api/routes/feedback.py
+This stores thumbs-up / thumbs-down feedback.
+It exposes:
+- POST /feedback
+Step by step:
+1. Sets DB_PATH to feedback.sqlite in the current working directory.
+2. Defines FeedbackBody with:
+   - question
+   - answer
+   - label, either "up" or "down"
+   - optional notes
+3. On import, calls init_db().
+4. init_db() creates the feedback table if it does not exist.
+5. POST /feedback inserts a row with:
+   - timestamp
+   - question
+   - answer
+   - label
+   - notes
+6. Returns:
+   {"ok": true}
+Core RAG Files
+core/chunking.py
+This splits long text into smaller overlapping pieces.
+Step by step:
+1. _split_text() takes:
+   - text
+   - max_chars, default 1200
+   - overlap, default 200
+2. Starts at character 0.
+3. Takes up to max_chars.
+4. Adds that slice as a chunk.
+5. Moves the start position forward, but backs up by overlap.
+6. Repeats until the full text is chunked.
+7. Removes blank chunks.
+chunk_texts() then:
+1. Takes a list of texts and matching metadata.
+2. Splits each text with _split_text().
+3. Copies the original metadata for each chunk.
+4. Adds chunk_index.
+5. Adds the actual chunk text into metadata as text.
+6. Returns:
+   - list of chunk strings
+   - list of chunk metadata dictionaries
+core/embeddings.py
+This creates vector embeddings using OpenAI.
+Step by step:
+1. Reads embedding model from OPENAI_EMBED_MODEL.
+2. Defaults to text-embedding-3-small.
+3. Reads timeout and retry settings from environment variables.
+4. embed_texts() creates an OpenAI client.
+5. Sends the list of texts to the embeddings API.
+6. Extracts and returns the embedding vectors.
+Used by:
+- ingestion, to embed document chunks
+- asking, to embed the user question
+core/retriever.py
+This wraps Qdrant operations.
+Step by step:
+1. Reads QDRANT_URL, defaulting to http://localhost:6333.
+2. Reads Qdrant timeout.
+3. QdrantStore.__init__() creates a Qdrant client.
+4. _ensure_collection() checks whether a collection exists.
+5. If the collection does not exist, it creates/recreates it using cosine distance.
+6. upsert() stores vectors and payloads in Qdrant.
+7. Each point gets:
+   - UUID id
+   - embedding vector
+   - metadata payload
+8. search() performs vector similarity search.
+9. Search results are normalized into dictionaries with:
+   - id
+   - score
+   - payload
+10. list_collections() returns Qdrant collection names.
+11. collection_exists() checks for a collection.
+12. list_documents() scrolls Qdrant records and groups chunks by source.
+13. delete_document() deletes all chunks matching a source.
+14. delete_collection() deletes a full collection.
+One important note: _ensure_collection() uses recreate_collection() when the collection is missing. In newer Qdrant clients, recreate_collection is often deprecated in favor of explicit create/delete behavior.
+core/generator.py
+This generates the final answer using OpenAI chat completion.
+Step by step:
+1. Reads chat model from OPENAI_CHAT_MODEL.
+2. Defaults to gpt-4o-mini.
+3. Defines a system prompt telling the model:
+   - use only provided context
+   - say it does not know if answer is not in context
+   - always cite sources
+4. _format_context() turns chunks and citations into numbered context blocks.
+5. Each context block looks roughly like:
+   [1] Title - source
+   chunk text
+6. generate_answer() creates an OpenAI client.
+7. Builds a prompt containing:
+   - user question
+   - numbered context chunks
+   - instructions to answer concisely with citation markers
+8. Calls OpenAI chat completion.
+9. Returns the assistant's response text.
+core/parsing/parsers.py
+This extracts text from local files.
+Step by step:
+1. Detects file extension.
+2. For .txt and .md:
+   - reads the file as UTF-8 text
+   - returns text and basename
+3. For .pdf:
+   - opens with pdfplumber
+   - extracts text from each page
+   - joins pages with newlines
+   - returns text and basename
+   - returns empty text if parsing fails
+4. For .docx:
+   - opens with python-docx
+   - joins paragraph text with newlines
+   - returns text and basename
+   - returns empty text if parsing fails
+5. For unknown extensions:
+   - tries to read as UTF-8 text
+   - returns empty text if that fails
+core/crawling/web.py
+This extracts readable text from web pages.
+Step by step:
+1. Uses requests.get() to download the page.
+2. Raises an error for non-2xx HTTP responses.
+3. Parses HTML with BeautifulSoup.
+4. Removes:
+   - <script>
+   - <style>
+   - <noscript>
+5. Extracts the page title.
+6. Finds text-heavy tags:
+   - paragraphs
+   - list items
+   - articles
+   - sections
+   - divs
+   - headings
+7. Joins their visible text into one large string.
+8. Returns text and title.
+9. If anything fails, returns empty strings.
+Test File
+tests/test_chunking.py
+This tests chunking behavior.
+Step by step:
+1. Creates one fake document with 3000 "A" characters.
+2. Creates metadata with source and title.
+3. Calls chunk_texts() with:
+   - max_chars=1000
+   - overlap=200
+4. Asserts that at least 3 chunks are created.
+5. Asserts that every chunk has matching metadata.
+Mental Model
+The core pieces connect like this:
+ingest.py
+  -> parsers.py or web.py
+  -> chunking.py
+  -> embeddings.py
+  -> retriever.py / Qdrant
+ask.py
+  -> embeddings.py
+  -> retriever.py / Qdrant
+  -> generator.py
+  -> answer with citations
+feedback.py
+  -> feedback.sqlite
+documents.py
+  -> retriever.py / Qdrant
+
+
+
+
